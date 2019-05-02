@@ -5,7 +5,8 @@ import json
 import os
 import sys
 import requests
-
+import numpy as np
+import astropy.io.fits
 
 class Client:
     """ Client for a TensorFlow ModelServer.
@@ -63,8 +64,12 @@ class Client:
         # Sends images from input directory
         input_glob = glob(self.input_dir + "/*" + self.input_extension)
         for i, img in enumerate(input_glob):
+            if self.input_extension == ".fits":
+                a = astropy.io.fits.getdata(img)
+                input_image = a.astype(np.uint16)
+            else:
+                input_image = open(img, "rb").read()
             # Encodes image in b64
-            input_image = open(img, "rb").read()
             input64 = base64.b64encode(input_image)
             input_string = input64.decode(self.encoding)
 
@@ -73,7 +78,7 @@ class Client:
             data = json.dumps({"instances": instance})
             print("POSTing image " + str(i) + ". Awaiting response...")
             json_response = requests.post(self.url, data=data)
-            print("Reponse received.")
+            print("Response received.")
 
             # Write output to a .txt file
             output_file = self.output_dir + "/text/output" + str(i) + ".txt"
@@ -82,6 +87,7 @@ class Client:
 
             # Extracts text from JSON
             response = json.loads(json_response.text)
+            print("response = " + str(response))
             response = response["predictions"][0]
 
             # Visualizes inferred image

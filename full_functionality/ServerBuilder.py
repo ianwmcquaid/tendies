@@ -2,8 +2,10 @@ import argparse
 import os
 import sys
 
-import keras.backend.tensorflow_backend as K
 import tensorflow as tf
+from tensorflow.keras import backend as K
+from tensorflow.keras.models import Model, load_model
+from tensorflow.keras.layers import Input, Lambda
 
 from tensorflow.saved_model.builder import SavedModelBuilder
 from tensorflow.saved_model.signature_def_utils import build_signature_def
@@ -53,14 +55,14 @@ class ServerBuilder:
         # Graph is default if unspecified, otherwise set it to the argument
         graph = tf.Graph() if graph is None else graph
 
-        # Instantiates a SavedModelBuilder
-        builder = SavedModelBuilder(save_path)
-
         # Creates signature for prediction
         signature_definition = build_signature_def(
             input_tensor_info_dict,
             output_tensor_info_dict,
             PREDICT_METHOD_NAME)
+
+        # Instantiates a SavedModelBuilder
+        builder = SavedModelBuilder(save_path)
 
         with tf.Session(graph=graph) as sess:
             # Initializes model and variables
@@ -257,6 +259,7 @@ class ServerBuilder:
                 optional_postprocess_args: Optional dict of arguments for use
                     with custom postprocess functions.
         """
+        sess = K.get_session()
 
         # Parses paths
         # Note that the serve directory MUST have a model version subdirectory
@@ -279,21 +282,28 @@ class ServerBuilder:
         output_tensor = keras_model(input_tensor)
 
         # Postprocesses output tensor(s)
-        post_map = optional_postprocess_args
-        output_bytes = Lambda(postprocess_function,
-                              arguments=post_map)(output_tensor)
+        # post_map = optional_postprocess_args
+        # output_bytes = Lambda(postprocess_function,
+        #                       arguments=post_map)(output_tensor)
+        output_bytes = postprocess_function(output_tensor)
 
         # Builds new Model
         model = Model(input_bytes, output_bytes)
+        model.summary()
 
         # Builds input/output tensor protos
         input_tensor_info = {"input_bytes": build_tensor_info(model.input)}
-        output_tensor_info = {"output_bytes": build_tensor_info(model.output)}
+        # output_tensor_info = {"output_bytes": build_tensor_info(model.output)}
+
+        output_tensor_info = {}
+        for output_layer in model.output:
+            output_tensor_info[output_layer.name.split("/")[0]] = build_tensor_info(output_layer)
 
         # Creates and saves SavedModel
         self._create_savedmodel(save_path,
                                 input_tensor_info,
-                                output_tensor_info)
+                                output_tensor_info,
+                                graph=sess.graph)
 
     def build_server_from_tf(self,
                              inference_function,
@@ -481,14 +491,14 @@ def example_usage(_):
     # Arbitrary Keras Model (Image-to-Image Segmentation in Keras)
     ###################################################################
     # Builds the server
-    # server_builder.build_server_from_keras(
-    #     preprocess_function=layer_injector.bitstring_to_float32_tensor,
-    #     postprocess_function=layer_injector.segmentation_map_to_bitstring_keras,
-    #     model_name=FLAGS.model_name,
-    #     model_version=FLAGS.model_version,
-    #     h5_filepath=FLAGS.h5_filepath,
-    #     serve_dir=FLAGS.serve_dir,
-    #     channels=FLAGS.channels)
+    server_builder.build_server_from_keras(
+        preprocess_function=layer_injector.bitstring_to_uint16_tensor,
+        postprocess_function=layer_injector.object_detection_tensor_to_multiple_outputs,
+        model_name=FLAGS.model_name,
+        model_version=FLAGS.model_version,
+        h5_filepath=FLAGS.h5_filepath,
+        serve_dir=FLAGS.serve_dir,
+        channels=FLAGS.channels)
 
 
 if __name__ == "__main__":
