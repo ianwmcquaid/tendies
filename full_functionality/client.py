@@ -65,17 +65,20 @@ class Client:
         input_glob = glob(self.input_dir + "/*" + self.input_extension)
         for i, img in enumerate(input_glob):
             if self.input_extension == ".fits":
-                a = astropy.io.fits.getdata(img)
+                print("Processing fits file...")
+                a = astropy.io.fits.getdata("C:\\Users\\imcquaid\\Documents\\exported_models\\test_images\\sat_26761.0103.fits")
                 input_image = a.astype(np.uint16)
             else:
                 input_image = open(img, "rb").read()
+
             # Encodes image in b64
             input64 = base64.b64encode(input_image)
-            input_string = input64.decode(self.encoding)
+            input_string = input64.decode("UTF-8")
 
             # Wraps bitstring in JSON and POSTs, then waits for response
             instance = [{"b64": input_string}]
             data = json.dumps({"instances": instance})
+
             print("POSTing image " + str(i) + ". Awaiting response...")
             json_response = requests.post(self.url, data=data)
             print("Response received.")

@@ -14,6 +14,10 @@ from tensorflow.saved_model.signature_constants \
 from tensorflow.saved_model.signature_constants import PREDICT_METHOD_NAME
 from tensorflow.saved_model.tag_constants import SERVING
 from tensorflow.saved_model.utils import build_tensor_info
+from tensorflow.python.framework import graph_util
+from tensorflow.python.framework import graph_io
+from tensorflow.python.saved_model import signature_constants
+from tensorflow.python.saved_model import tag_constants
 
 from LayerInjector import LayerInjector
 
@@ -34,6 +38,59 @@ class ServerBuilder:
     def __init__(self):
         pass
 
+    def _create_savedmodel_keras(
+            self,
+            save_path,
+            model,
+            input_tensor_name):
+        """
+        Branch of the _create_savemodel function intended for saving Keras models. The main version does not save
+        Keras models properly results in inferences that appear to come from a randomly initialized model (though
+        TF Serving does not produce an error).
+
+        :param save_path:
+        :param model:
+        :param input_tensor_name:
+        :param output_tensor_names:
+        :return:
+        """
+        # First instantiate our builder
+        builder = tf.saved_model.builder.SavedModelBuilder(save_path)
+
+        sigs = {}
+        with K.get_session() as sess:
+            # Get the graph
+            tf.import_graph_def(sess.graph.as_graph_def(), name="")
+            g = tf.get_default_graph()
+
+            # Get our input tensor (currently only supporting single-input models)
+            inp = g.get_tensor_by_name(input_tensor_name)
+
+            if type(model.output) is list:
+                # This code block allows us to export multiple output models to TF Serving
+                output_dict = {}
+                for output_layer in model.output:
+                    full_layer_name = output_layer.name
+                    short_layer_name = full_layer_name.split("/")[0]
+                    output_dict[short_layer_name] = g.get_tensor_by_name(full_layer_name)
+            else:
+                output_dict = {"output": g.get_tensor_by_name(model.output.name)}
+
+            sigs[signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY] = \
+                tf.saved_model.signature_def_utils.predict_signature_def(
+                    {"input": inp}, output_dict)
+
+            builder.add_meta_graph_and_variables(sess,
+                                                 [tag_constants.SERVING],
+                                                 signature_def_map=sigs)
+            try:
+                builder.save()
+                print(f'Model ready for deployment at     {save_path}/saved_model.pb')
+                print('Prediction signature : ')
+                print(sigs['serving_default'])
+            except:
+                print('Error, please check frozen graph')
+
     def _create_savedmodel(self,
                            save_path,
                            input_tensor_info_dict,
@@ -53,7 +110,8 @@ class ServerBuilder:
         """
 
         # Graph is default if unspecified, otherwise set it to the argument
-        graph = tf.Graph() if graph is None else graph
+        # graph = tf.Graph() if graph is None else graph
+
 
         # Creates signature for prediction
         signature_definition = build_signature_def(
@@ -64,7 +122,8 @@ class ServerBuilder:
         # Instantiates a SavedModelBuilder
         builder = SavedModelBuilder(save_path)
 
-        with tf.Session(graph=graph) as sess:
+        # with tf.Session(graph=graph) as sess:
+        with K.get_session() as sess:
             # Initializes model and variables
             sess.run(tf.global_variables_initializer())
 
@@ -259,8 +318,6 @@ class ServerBuilder:
                 optional_postprocess_args: Optional dict of arguments for use
                     with custom postprocess functions.
         """
-        sess = K.get_session()
-
         # Parses paths
         # Note that the serve directory MUST have a model version subdirectory
         model_version = str(model_version)
@@ -282,28 +339,22 @@ class ServerBuilder:
         output_tensor = keras_model(input_tensor)
 
         # Postprocesses output tensor(s)
-        # post_map = optional_postprocess_args
-        # output_bytes = Lambda(postprocess_function,
-        #                       arguments=post_map)(output_tensor)
-        output_bytes = postprocess_function(output_tensor)
+        postprocess_tensor = postprocess_function(output_tensor, **optional_postprocess_args)
+        if type(postprocess_tensor) == list:
+            # Multiple outputs
+            output_layers = postprocess_tensor
+        else:
+            # Single output
+            post_map = optional_postprocess_args
+            output_layers = Lambda(postprocess_function,
+                                   arguments=post_map)(output_tensor)
 
         # Builds new Model
-        model = Model(input_bytes, output_bytes)
-        model.summary()
+        model = Model(input_bytes, output_layers)
 
-        # Builds input/output tensor protos
-        input_tensor_info = {"input_bytes": build_tensor_info(model.input)}
-        # output_tensor_info = {"output_bytes": build_tensor_info(model.output)}
-
-        output_tensor_info = {}
-        for output_layer in model.output:
-            output_tensor_info[output_layer.name.split("/")[0]] = build_tensor_info(output_layer)
-
-        # Creates and saves SavedModel
-        self._create_savedmodel(save_path,
-                                input_tensor_info,
-                                output_tensor_info,
-                                graph=sess.graph)
+        self._create_savedmodel_keras(save_path,
+                                      model,
+                                      input_tensor_name=model.input.name)
 
     def build_server_from_tf(self,
                              inference_function,
@@ -492,7 +543,7 @@ def example_usage(_):
     ###################################################################
     # Builds the server
     server_builder.build_server_from_keras(
-        preprocess_function=layer_injector.bitstring_to_uint16_tensor,
+        preprocess_function=layer_injector.bitstring_square_image_to_float_tensor,
         postprocess_function=layer_injector.object_detection_tensor_to_multiple_outputs,
         model_name=FLAGS.model_name,
         model_version=FLAGS.model_version,

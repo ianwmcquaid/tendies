@@ -82,41 +82,6 @@ class LayerInjector:
         input_tensor = tf.expand_dims(input_tensor, 0)
         return input_tensor
 
-    def bitstring_to_uint16_tensor(self,
-                                   input_bytes,
-                                   channels,
-                                   normalize_img=False,
-                                   *args):
-        """ Transforms image bitstring to uint8 tensor.
-
-            Args:
-                input_bytes: A bitstring representative of an input image.
-                channels: The number of channels of the input image.
-
-            Returns:
-                input_tensor: A batched uint8 tensor representative of
-                    the input image.
-        """
-
-        input_bytes = tf.reshape(input_bytes, [])
-        input_bytes = tf.cast(input_bytes, tf.string)
-
-        # Transforms bitstring to uint16 tensor
-        # input_tensor = tf.image.decode_png(input_bytes, channels=0, dtype=tf.uint16)
-        input_tensor = tf.decode_raw(input_bytes, tf.uint16)
-        input_tensor = tf.reshape(input_tensor, [512, 512, 1])
-
-        # Normalize the image pixels to have zero mean and unit variance
-        if normalize_img:
-            input_tensor = tf.image.per_image_standardization(input_tensor)
-
-        # Convert to float
-        input_tensor = tf.cast(input_tensor, tf.float32)
-
-        # Expands the single tensor into a batch of 1
-        input_tensor = tf.expand_dims(input_tensor, 0)
-        return input_tensor
-
     def float32_tensor_to_bitstring(self, output_tensor, *args):
         """ Transforms float32 tensor to bitstring and returns nodes.
 
@@ -194,24 +159,6 @@ class LayerInjector:
         # Returns output list and image boolean
         return output_node_names, OUTPUT_AS_IMAGE
 
-    def object_detection_tensor_to_multiple_outputs(self, output_tensor, **kwargs):
-        # We always have the offset and background probability tensors
-        output_layers = [
-            Lambda(lambda x: x[:, :, 0], name="y_min")(output_tensor),
-            Lambda(lambda x: x[:, :, 1], name="x_min")(output_tensor),
-            Lambda(lambda x: x[:, :, 2], name="y_max")(output_tensor),
-            Lambda(lambda x: x[:, :, 3], name="x_max")(output_tensor),
-            Lambda(lambda x: x[:, :, 4], name="prob_background_class")(output_tensor),
-        ]
-
-        # The number of classes we have depends on the problem
-        num_classes = int(output_tensor.shape[2] - 4)
-        for i in range(1, num_classes):
-            output_layers.append(Lambda(lambda x: x[:, :, 4 + i], name="prob_class_" + str(i))(output_tensor))
-
-        # Done, so return
-        return output_layers
-
     def float32_tensor_to_bitstring_keras(self, output_tensor, **kwargs):
         """ Transforms float32 tensor to bitstring tensor.
 
@@ -286,3 +233,87 @@ class LayerInjector:
 
         # Returns bitstring tensor
         return output_bytes
+
+    def bitstring_square_image_to_float_tensor(self,
+                                               input_bytes,
+                                               channels=1,
+                                               normalize_img=True,
+                                               **kwargs):
+        """
+        Injected input layer for handling object detection inputs to Keras models.
+        In particular, this was designed for space imagery where common image sizes
+        were 512 X 512, 1024 X 1024, and 2048 X 2048. The Keras model used was fully
+        convolutional, so we desired a hosted model that could handle all of these
+        inputs. The solution is to make the reshape dynamic by assuming the input
+        is a square image.
+
+        :param input_bytes: the serialized string representation of the input image
+        :param channels: number of channels in the input image
+        :param normalize_img: should the pixel values be normalized/standardized?
+        :param kwargs: not used
+        :return: a float32 tensor that is an appropriate input to our model
+        """
+        # Remove the batch dimension
+        input_bytes = tf.squeeze(input_bytes)
+
+        # Transforms bitstring to uint16 tensor
+        input_tensor = tf.decode_raw(input_bytes, tf.uint16)
+        image_total_size = tf.cast(tf.shape(input_tensor)[0], tf.float32)
+        image_hw = tf.cast(tf.sqrt(image_total_size / channels), tf.int32)
+        input_tensor = tf.reshape(input_tensor, [image_hw, image_hw, channels])
+
+        # Normalize the image pixels to have zero mean and unit variance
+        if normalize_img:
+            input_tensor = tf.image.per_image_standardization(input_tensor)
+
+        # Convert to float
+        input_tensor = tf.cast(input_tensor, tf.float32)
+
+        # Expands the single tensor into a batch of 1
+        input_tensor = tf.expand_dims(input_tensor, 0)
+        return input_tensor
+
+    def object_detection_tensor_to_multiple_outputs(self,
+                                                    output_tensor,
+                                                    remove_padding=True,
+                                                    padding_value=-1.0,
+                                                    **kwargs):
+        """
+        A layer to be injected as an output for our Keras object detection models. The intent is
+        to remove unreadable artifacts, such as detection padding, as well as to attach names
+        where possible to return values. Though this solution isn't perfect, it at least is
+        more readable than the default (Batch X Num Predictions X 4 + Num Classes) float32
+        tensor.
+
+        :param output_tensor: the output from our model (Batch X Num Predictions X 4 + Num Classes)
+        :param remove_padding: boolean stating if padding should be removed
+        :param padding_value: the value used for padding in this output
+        :param kwargs: not used
+        :return: a list of each output tensor, named so that they return clean from TF Serving
+        """
+        # First, remove any padded results so our response is cleaner
+        mask_layer = output_tensor
+        if remove_padding:
+            def remove_padding(padded_tensor, pad_val):
+                orig_shape = tf.shape(padded_tensor)
+                padding_mask = tf.equal(padded_tensor[:, :, 0], pad_val)
+                unpadded_tensor = tf.boolean_mask(padded_tensor, tf.logical_not(padding_mask))
+                return tf.reshape(unpadded_tensor, [orig_shape[0], -1, orig_shape[2]])
+            mask_layer = Lambda(remove_padding, arguments={"pad_val": padding_value})(output_tensor)
+
+        # We always have the offset and background probability tensors
+        output_layers = [
+            Lambda(lambda x: x[:, :, 0], name="y_min")(mask_layer),
+            Lambda(lambda x: x[:, :, 1], name="x_min")(mask_layer),
+            Lambda(lambda x: x[:, :, 2], name="y_max")(mask_layer),
+            Lambda(lambda x: x[:, :, 3], name="x_max")(mask_layer),
+            Lambda(lambda x: x[:, :, 4], name="prob_background_class")(mask_layer),
+        ]
+
+        # The number of classes we have depends on the problem
+        num_classes = int(mask_layer.shape[2] - 4)
+        for i in range(1, num_classes):
+            output_layers.append(Lambda(lambda x: x[:, :, 4 + i], name="prob_class_" + str(i))(mask_layer))
+
+        # Done, so return
+        return output_layers
