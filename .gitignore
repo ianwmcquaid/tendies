@@ -8,3 +8,7 @@
 /*/.ipynb_checkpoints
 /minimum_working_example/.ipynb_checkpoints
 /minimum_working_example/pipeline_diagram.pptx
+
+# Ignore the build information used by Setup.py to generate .whl file
+build/
+tendies.egg-info
