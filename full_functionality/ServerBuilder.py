@@ -19,8 +19,7 @@ from tensorflow.python.framework import graph_io
 from tensorflow.python.saved_model import signature_constants
 from tensorflow.python.saved_model import tag_constants
 
-from LayerInjector import LayerInjector
-
+from full_functionality.LayerInjector import LayerInjector
 
 class ServerBuilder:
     """ Exports TensorFlow image-based model for serving with RESTful API.
